@@ -1,0 +1,17 @@
+version: "3.9"
+
+services:
+  loadbalancer:
+    build: ./load_balancer
+    container_name: loadbalancer
+    ports:
+      - "8000:8000"   # expose LB API
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - net1
+
+networks:
+  net1:
+    driver: bridge
