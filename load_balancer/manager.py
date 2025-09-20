@@ -16,9 +16,10 @@ class Manager:
 
                 # run server container in net1 network
                 cmd = (
-                    f"docker run -d --name {h} "
+                    f"docker run -d --rm --name {h} "
                     f"--network net1 --network-alias {h} "
                     f"-e SERVER_ID={h} "
+                    f"--label lb=shard_lb "
                     f"myserver"
                 )
                 print(f"[Manager] Spawning server {h} on port {port}")
