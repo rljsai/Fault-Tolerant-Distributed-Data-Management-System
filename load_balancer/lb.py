@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request
 import requests
 from manager import Manager
+import random
 
 app = Flask(__name__)
 manager = Manager()
@@ -44,19 +45,42 @@ def remove_replicas():
     return jsonify({"message": data, "status": "successful"}), 200
 
 
+# @app.route("/<path:subpath>", methods=["GET"])
+# def forward_request(subpath):
+#     request_id = random.randint(1, 1_000_000)
+#     server = manager.get_server_for_request( request_id)
+#     if not server:
+#         return jsonify({"message": "No servers available", "status": "error"}), 500
+
+#     try:
+#         # 🚀 Use Docker network alias instead of localhost:port
+#         url = f"http://{server}:5000/{subpath}"
+#         resp = requests.get(url)
+#         return jsonify(resp.json()), resp.status_code
+#     except Exception as e:
+#         return jsonify({"message": f"Error forwarding to {server}: {str(e)}", "status": "error"}), 500
+
 @app.route("/<path:subpath>", methods=["GET"])
 def forward_request(subpath):
-    server = manager.get_server_for_request("/" + subpath)
+    rid = request.args.get("rid")
+    if rid is None:
+        rid = random.randint(1, 1_000_000)
+    else:
+        rid = int(rid)
+
+    server = manager.get_server_for_request(rid)
     if not server:
         return jsonify({"message": "No servers available", "status": "error"}), 500
 
     try:
-        # 🚀 Use Docker network alias instead of localhost:port
         url = f"http://{server}:5000/{subpath}"
         resp = requests.get(url)
         return jsonify(resp.json()), resp.status_code
     except Exception as e:
-        return jsonify({"message": f"Error forwarding to {server}: {str(e)}", "status": "error"}), 500
+        return jsonify({
+            "message": f"Error forwarding to {server}: {str(e)}",
+            "status": "error"
+        }), 500
 
 
 if __name__ == "__main__":
