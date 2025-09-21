@@ -45,20 +45,6 @@ def remove_replicas():
     return jsonify({"message": data, "status": "successful"}), 200
 
 
-# @app.route("/<path:subpath>", methods=["GET"])
-# def forward_request(subpath):
-#     request_id = random.randint(1, 1_000_000)
-#     server = manager.get_server_for_request( request_id)
-#     if not server:
-#         return jsonify({"message": "No servers available", "status": "error"}), 500
-
-#     try:
-#         # 🚀 Use Docker network alias instead of localhost:port
-#         url = f"http://{server}:5000/{subpath}"
-#         resp = requests.get(url)
-#         return jsonify(resp.json()), resp.status_code
-#     except Exception as e:
-#         return jsonify({"message": f"Error forwarding to {server}: {str(e)}", "status": "error"}), 500
 
 @app.route("/<path:subpath>", methods=["GET"])
 def forward_request(subpath):

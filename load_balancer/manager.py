@@ -1,12 +1,20 @@
 import os
 from hash_ring import HashRing
-
+import threading
+import time
+import requests
 class Manager:
     def __init__(self):
         self.ring = HashRing()
         self.replicas = set()
         self.server_ports = {}   # server_id -> port
         self.next_port = 5000    # starting port
+        self.counter = 1         # for new server naming
+        self.lock = threading.Lock()
+
+        # start background thread for heartbeat
+        t = threading.Thread(target=self._heartbeat_checker, daemon=True)
+        t.start()
 
     def add_servers(self, hostnames):
         for h in hostnames:
@@ -53,3 +61,28 @@ class Manager:
 
     def get_server_port(self, server_id):
         return self.server_ports.get(server_id, None)
+    
+    def _heartbeat_checker(self):
+        """Periodically check servers and auto-replace failed ones"""
+        while True:
+            time.sleep(5)  # check every 5s
+            dead = []
+            with self.lock:
+                for server in list(self.replicas):
+                    try:
+                        url = f"http://{server}:5000/heartbeat"
+                        r = requests.get(url, timeout=2)
+                        if r.status_code != 200:
+                            dead.append(server)
+                    except Exception:
+                        dead.append(server)
+
+                for d in dead:
+                    print(f"[Heartbeat] Server {d} failed! Replacing...")
+                    self.remove_servers([d])
+
+                    # spawn replacement
+                    new_name = f"ServerAuto{self.counter}"
+                    self.counter += 1
+                    self.add_servers([new_name])
+
