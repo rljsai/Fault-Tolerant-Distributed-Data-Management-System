@@ -67,6 +67,6 @@ def exp_A2():
 
 if __name__ == "__main__":
     exp_A2()
-    print("✅ Chart saved as A2_bar_chart.png")
+    print(" Chart saved as A2_bar_chart.png")
 
 

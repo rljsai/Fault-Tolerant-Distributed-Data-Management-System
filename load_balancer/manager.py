@@ -9,10 +9,11 @@ class Manager:
         self.replicas = set()
         self.server_ports = {}   # server_id -> port
         self.next_port = 5000    # starting port
-        self.counter = 1         # for new server naming
+        
+        # following is for heartbeat checking
+        self.counter = 1 # for new server naming
         self.lock = threading.Lock()
-
-        # start background thread for heartbeat
+         # start background thread for heartbeat
         t = threading.Thread(target=self._heartbeat_checker, daemon=True)
         t.start()
 
