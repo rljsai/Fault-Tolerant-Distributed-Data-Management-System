@@ -4,69 +4,66 @@ import requests
 import matplotlib.pyplot as plt
 from collections import Counter
 import random
-import time
 
 LB_URL = "http://localhost:8000"
 
 def parse_server_id(data):
     msg = data.get("message", "")
-    if msg.startswith("Hello from server:"):
+    if isinstance(msg, str) and msg.startswith("Hello from server:"):
         return msg.replace("Hello from server:", "").strip()
     return None
 
 async def send_request(session, request_id, path="/home"):
-    async with session.get(f"{LB_URL}{path}?rid={request_id}") as resp:
-        if resp.status != 200:
-            return None
-        data = await resp.json()
-        return parse_server_id(data)
+    try:
+        async with session.get(f"{LB_URL}{path}?rid={request_id}") as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+            return parse_server_id(data)
+    except Exception:
+        return None
 
-async def run_experiment(num_requests=1000): # only 1000 requests
+async def run_experiment(num_requests=10000):
     async with aiohttp.ClientSession() as session:
         tasks = [send_request(session, random.randint(1, 1_000_000)) for _ in range(num_requests)]
         results = await asyncio.gather(*tasks)
-    return Counter([r for r in results if r])
+    return Counter([r for r in results if r]), sum(r is None for r in results)
 
 def set_servers(n):
-    # clear all
+    # clear existing
     resp = requests.get(f"{LB_URL}/rep").json()
     existing = resp["message"]["replicas"]
     if existing:
-        requests.delete(f"{LB_URL}/rm", json={"n": len(existing), "hostnames": existing})
+        requests.delete(f"{LB_URL}/rm", json={"n": 9999, "hostnames": existing})
 
-    # add clean Server1..N
+    # add fresh servers
     hostnames = [f"Server{i}" for i in range(1, n + 1)]
     requests.post(f"{LB_URL}/add", json={"n": n, "hostnames": hostnames})
-    time.sleep(3)
-
-def exp_A1():
-    set_servers(3)
-    counts = asyncio.run(run_experiment())
-    print("A-1 Results:", counts)
-
-    plt.bar(counts.keys(), counts.values())
-    plt.title("A-1: Load distribution with N=3 servers")
-    plt.xlabel("Server")
-    plt.ylabel("Requests handled")
-    plt.savefig("A1_bar_chart.png")
-    plt.close()
 
 def exp_A2():
-    for n in [4,6]:
-        print(f"\nRunning experiment with N={n}")
-        set_servers(n)
-        counts = asyncio.run(run_experiment())
-        print(f"A-2 (N={n}) Results:", counts)
+    avg_loads = []
+    num_servers = list(range(2, 7))  # N = 2 → 6
 
-        plt.bar(counts.keys(), counts.values())
-        plt.title(f"A-2: Load distribution with N={n} servers")
-        plt.xlabel("Server")
-        plt.ylabel("Requests handled")
-        plt.savefig(f"A2_N{n}_bar_chart.png")
-        plt.close()
+    for n in num_servers:
+        print(f"Running experiment with N={n} servers...")
+        set_servers(n)
+        counts, failed = asyncio.run(run_experiment())
+
+        total = sum(counts.values())
+        avg = total / n if n > 0 else 0
+        avg_loads.append(avg)
+
+        print(f"N={n}, Avg load={avg}, Failed={failed}")
+
+    # Plot line chart
+    plt.plot(num_servers, avg_loads, marker="o", linestyle="-", color="b")
+    plt.title("A2: Average Load per Server (N=2 to 6)")
+    plt.xlabel("Number of Servers (N)")
+    plt.ylabel("Average Requests per Server")
+    plt.grid(True)
+    plt.savefig("A2_line_chart.png")
+    plt.close()
+    print("Chart saved as A2_line_chart.png")
 
 if __name__ == "__main__":
     exp_A2()
-    print(" Chart saved as A2_bar_chart.png")
-
-
