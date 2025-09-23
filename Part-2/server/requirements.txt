@@ -1,0 +1,2 @@
+quart==0.18.4
+werkzeug==2.2.0
