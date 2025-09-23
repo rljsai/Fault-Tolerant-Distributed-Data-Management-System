@@ -1,5 +1,5 @@
 # Use a lightweight Python image
-FROM python:3.10-slim  
+FROM python:3.10-slim
 
 # Set working directory
 WORKDIR /app
@@ -14,5 +14,5 @@ COPY app.py .
 # Expose port 5000 (inside container)
 EXPOSE 5000
 
-# Run Flask app
+# Run Quart app
 CMD ["python", "app.py"]
