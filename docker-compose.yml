@@ -5,7 +5,7 @@ services:
     build: ./load_balancer
     container_name: loadbalancer
     ports:
-      - "8000:8000"   # expose LB API
+      - "8000:8000"
     privileged: true
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
