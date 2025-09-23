@@ -63,12 +63,6 @@ def exp_A1():
     counts, failed = asyncio.run(run_experiment())
     plot_results("A1", counts, failed)
 
-def exp_A2():
-    set_servers(5)
-    counts, failed = asyncio.run(run_experiment())
-    plot_results("A2", counts, failed)
-
 if __name__ == "__main__":
     exp_A1()
-    exp_A2()
     print("Charts saved as A1_bar_chart.png and A2_bar_chart.png")
