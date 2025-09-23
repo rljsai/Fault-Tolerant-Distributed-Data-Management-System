@@ -1,2 +1,5 @@
-flask
-requests
+quart==0.18.4
+werkzeug==2.2.0
+aiohttp==3.9.5
+aiodocker==0.21.0
+colorama==0.4.6

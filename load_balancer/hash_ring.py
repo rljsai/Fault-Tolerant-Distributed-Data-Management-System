@@ -58,6 +58,25 @@ class HashRing:
             idx = 0  # wrap around
         nearest_slot = self.sorted_slots[idx]
         return self.ring[nearest_slot]
+    
+    def get_next_server(self, current_server):
+        """Return the next clockwise server after current_server"""
+        if not self.sorted_slots:
+            return None
+
+        slots = [slot for slot, sid in self.ring.items() if sid == current_server]
+        if not slots:
+            return None
+
+        start_slot = slots[0]
+        idx = self.sorted_slots.index(start_slot)
+
+        for i in range(1, len(self.sorted_slots) + 1):
+            next_idx = (idx + i) % len(self.sorted_slots)
+            next_server = self.ring[self.sorted_slots[next_idx]]
+            if next_server != current_server:
+                return next_server
+        return None
 
     def get_servers(self):
         """Return list of active servers"""
