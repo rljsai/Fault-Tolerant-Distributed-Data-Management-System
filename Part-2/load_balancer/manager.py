@@ -6,7 +6,7 @@ from colorama import Fore, Style
 
 
 class Manager:
-    def __init__(self, heartbeat_interval=5, max_fails=3):
+    def __init__(self, heartbeat_interval=5, max_fails=3, on_server_dead=None):
         self.ring = HashRing()
         self.replicas = set()
         self.heartbeat_fail_count = {}
@@ -15,6 +15,7 @@ class Manager:
         self.max_fails = max_fails
         self.counter = 1  # for auto-spawn names
         self._task = None  # heartbeat task will be started later
+        self.on_server_dead = on_server_dead  # callback in LB
 
     async def start(self):
         """Start background heartbeat checker (call inside Quart before_serving)."""
@@ -114,13 +115,8 @@ class Manager:
             for d in dead:
                 print(f"{Fore.RED}[Heartbeat] {d} failed! Respawning...{Style.RESET_ALL}")
                 # mark dead and attempt to restore by removing and spawning a new server
-                try:
-                    await self.remove_server(d)
-                except Exception:
-                    pass
-                new_name = f"ServerAuto{self.counter}"
-                self.counter += 1
-                await self.spawn_server(new_name)
+                if self.on_server_dead:
+                    await self.on_server_dead(d)   # delegate to LB
 
     async def _send_config(server_name, shard_list, retries=5, delay=2):
         async with aiohttp.ClientSession() as session:

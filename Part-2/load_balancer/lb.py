@@ -4,8 +4,111 @@ import aiohttp
 import asyncio
 from manager import Manager
 
+async def handle_server_failure(dead_server):
+    print(f"[Recover] Handling failure of {dead_server}")
+
+    # 1. Figure out shards *before* removing the server
+    affected_shards = [sid for sid, hosts in MapT.items() if dead_server in hosts]
+
+    # 2. Remove dead server cleanly
+    try:
+        await manager.remove_server(dead_server)
+    except Exception as e:
+        print(f"[Recover] Failed to remove {dead_server}: {e}")
+
+    # Clean MapT (remove dead server from all shard mappings)
+    for sid, hosts in list(MapT.items()):
+        MapT[sid] = [h for h in hosts if h in manager.replicas]
+
+    # If no shards were on this server → nothing to do
+    if not affected_shards:
+        print(f"[Recover] No shards were mapped to {dead_server}")
+        return
+
+    # 3. Spawn replacement
+    new_name = f"ServerAuto{manager.counter}"
+    manager.counter += 1
+    await manager.spawn_server(new_name)
+
+    # 4. Wait until heartbeat responds
+    async def wait_for_heartbeat(server_name, retries=10, delay=2):
+        async with aiohttp.ClientSession() as session:
+            for _ in range(retries):
+                try:
+                    async with session.get(f"http://{server_name}:5000/heartbeat") as resp:
+                        if resp.status == 200:
+                            return True
+                except:
+                    pass
+                await asyncio.sleep(delay)
+        return False
+
+    ready = await wait_for_heartbeat(new_name)
+    if not ready:
+        print(f"[Recover] {new_name} never responded to heartbeat, aborting recovery")
+        return
+
+    # 5. Configure new server with affected shards
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(
+                f"http://{new_name}:5000/config", json={"shard_ids": affected_shards}
+            ) as resp:
+                if resp.status == 200:
+                    print(f"[Recover] Configured {new_name} with {affected_shards}")
+                else:
+                    print(f"[Recover] Failed to configure {new_name}, status={resp.status}")
+        except Exception as e:
+            print(f"[Recover] Error configuring {new_name}: {e}")
+
+    # 6. Restore shard data from healthy replicas
+    for shard_id in affected_shards:
+        healthy_hosts = [h for h in MapT[shard_id] if h in manager.replicas and h != dead_server]
+        if not healthy_hosts:
+            print(f"[Recover] No healthy replicas available for {shard_id}, cannot restore data")
+            continue
+
+        donor = healthy_hosts[0]
+        try:
+            status, data = await call_server_copy(donor, params={"shard_id": shard_id})
+            if status == 200 and "rows" in data and isinstance(data["rows"], list):
+                rows = data["rows"]
+                if rows:
+                    # ✅ Reshape rows into proper /write format
+                    payload = {
+                        "shard": shard_id,
+                        "curr_idx": 0,
+                        "data": [
+                            {
+                                "Stud_id": r["stud_id"],
+                                "Stud_name": r["stud_name"],
+                                "Stud_marks": r["stud_marks"]
+                            }
+                            for r in rows
+                        ]
+                    }
+                    async with aiohttp.ClientSession() as session:
+                        await session.post(
+                            f"http://{new_name}:5000/write",
+                            json=payload
+                        )
+                    print(f"[Recover] Restored {len(rows)} rows of {shard_id} to {new_name}")
+                else:
+                    print(f"[Recover] No rows to restore for {shard_id}")
+            else:
+                print(f"[Recover] Copy from {donor} failed or returned bad data: {data}")
+        except Exception as e:
+            print(f"[Recover] Exception while copying shard {shard_id} from {donor}: {e}")
+
+        # Update MapT with new server
+        MapT[shard_id].append(new_name)
+
+
+
+
+
 app = Quart(__name__)
-manager = Manager()
+manager = Manager(on_server_dead=handle_server_failure)
 
 # --- In-memory metadata ---
 # ShardT: list of shards with { shard_id, stud_id_low, shard_size, valid_idx }
@@ -383,43 +486,6 @@ async def lb_delete():
         "status": "success"
     }), 200
 
-
-# fallback proxy/wildcard for other endpoints
-@app.route("/<path:subpath>", methods=["GET", "POST", "PUT", "DELETE"])
-async def forward_request(subpath):
-    # keep old behavior: use request id rid for consistent hashing if provided
-    rid = request.args.get("rid")
-    if rid is None:
-        rid = random.randint(1, 1_000_000)
-    else:
-        rid = int(rid)
-
-    server = manager.get_server_for_request(rid)
-    tried = set()
-    max_retries = len(manager.replicas) or 1
-
-    for _ in range(max_retries):
-        if not server or server in tried:
-            break
-        tried.add(server)
-
-        try:
-            # proxy GET or POST accordingly
-            async with aiohttp.ClientSession() as session:
-                if request.method == "GET":
-                    async with session.get(f"http://{server}:5000/{subpath}", params=await request.args) as resp:
-                        data = await resp.json()
-                        return jsonify(data), resp.status
-                else:
-                    body = await request.get_json(silent=True)
-                    async with session.request(request.method, f"http://{server}:5000/{subpath}", json=body) as resp:
-                        data = await resp.json()
-                        return jsonify(data), resp.status
-        except Exception as e:
-            print(f"[Proxy] server {server} failed: {e}")
-            server = manager.ring.get_next_server(server)
-
-    return jsonify({"message": "All retries failed, no servers available", "status": "error"}), 500
 
 # Run
 if __name__ == "__main__":
