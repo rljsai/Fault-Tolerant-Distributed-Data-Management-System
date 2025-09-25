@@ -1,18 +1,22 @@
-# Use a lightweight Python image
 FROM python:3.10-slim
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements and install dependencies
+# Install Postgres server + client
+RUN apt-get update && apt-get install -y \
+    postgresql postgresql-contrib \
+    libpq-dev gcc \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
 COPY app.py .
+COPY deploy.sh .
 
-# Expose port 5000 (inside container)
-EXPOSE 5000
+# Ensure script is Unix formatted and executable
+RUN sed -i 's/\r$//' deploy.sh && chmod +x deploy.sh
 
-# Run Quart app
-CMD ["python", "app.py"]
+EXPOSE 5000 5432
+
+CMD ["./deploy.sh"]
