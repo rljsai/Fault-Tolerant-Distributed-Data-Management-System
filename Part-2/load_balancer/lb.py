@@ -331,35 +331,37 @@ async def lb_write():
         shard_id = find_shard_for_id(int(row["Stud_id"]))
         if not shard_id:
             return jsonify({"error": f"Stud_id {row['Stud_id']} not in any shard"}), 400
+        
+        lock = shard_locks.get(shard_id)
+        async with lock:
+            hosts = MapT.get(shard_id, [])
+            if not hosts:
+               return jsonify({"error": f"No replicas for shard {shard_id}"}), 500
 
-        hosts = MapT.get(shard_id, [])
-        if not hosts:
-            return jsonify({"error": f"No replicas for shard {shard_id}"}), 500
+            # prepare request for server spec
+            server_req = {
+                "shard": shard_id,
+                "curr_idx": next(s["valid_idx"] for s in ShardT if s["shard_id"] == shard_id),
+                "data": [row]
+            }
 
-        # prepare request for server spec
-        server_req = {
-            "shard": shard_id,
-            "curr_idx": next(s["valid_idx"] for s in ShardT if s["shard_id"] == shard_id),
-            "data": [row]
-        }
-
-        failures = []
-        for host in hosts:
-            try:
+            failures = []
+            for host in hosts:
+              try:
                 async with aiohttp.ClientSession() as session:
                     resp = await session.post(f"http://{host}:5000/write", json=server_req)
                     if resp.status != 200:
                         failures.append(host)
-            except Exception as e:
+              except Exception as e:
                 print(f"[LB write] failed to {host}: {e}")
                 failures.append(host)
 
-        # update index
-        for s in ShardT:
-            if s["shard_id"] == shard_id:
+             # update index
+            for s in ShardT:
+              if s["shard_id"] == shard_id:
                 s["valid_idx"] += 1
 
-        results[shard_id] = {"inserted": 1, "failures": failures}
+            results[shard_id] = {"inserted": 1, "failures": failures}
 
     return jsonify({"status": "completed", "details": results}), 200
 
