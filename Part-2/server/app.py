@@ -136,22 +136,27 @@ async def read():
 
 
 # -------------------- Copy --------------------
-
 @app.route("/copy", methods=["GET"])
 async def copy_shard():
     """
     Copy all rows from a shard (used for recovery).
     Query param: shard_id=<id>
     """
-    shard_id = int(request.args.get("shard_id"))
+    shard_id = request.args.get("shard_id")
+    if not shard_id:
+        return jsonify({"error": "shard_id missing"}), 400
 
     if shard_id not in owned_shards:
-        return jsonify({"error": "This server does not own the shard"}), 400
+        return jsonify({"error": f"This server does not own {shard_id}"}), 400
 
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM StudT WHERE Shard_id=$1", shard_id)
+        rows = await conn.fetch(
+            'SELECT * FROM studt WHERE shard_id=$1',
+            shard_id
+        )
 
-    return jsonify([dict(r) for r in rows]), 200
+    # Always return { "rows": [...] }
+    return jsonify({"rows": [dict(r) for r in rows]}), 200
 
 
 # -------------------- Update --------------------
