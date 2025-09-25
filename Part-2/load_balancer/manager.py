@@ -42,22 +42,27 @@ class Manager:
                     name=hostname,
                     config={
                         "Image": "myserver",  # image built from server Dockerfile
-                        "Env": [f"SERVER_ID={hostname}"],
+                        "Env": [f"SERVER_ID={hostname}", "POSTGRES_USER=postgres", "POSTGRES_PASSWORD=postgres", "POSTGRES_DB=studdb"],
                         "Hostname": hostname,
                         "Tty": True,
                     },
                 )
-                net = await docker.networks.get("net1")
-                await net.connect({
-                    "Container": container.id,
-                    "EndpointConfig": {"Aliases": [hostname]}
-                })
+                # connect network net1 if exists
+                try:
+                    net = await docker.networks.get("net1")
+                    await net.connect({
+                        "Container": container.id,
+                        "EndpointConfig": {"Aliases": [hostname]}
+                    })
+                except Exception:
+                    pass
                 await container.start()
                 print(f"{Fore.GREEN}[Spawned]{Style.RESET_ALL} {hostname}")
 
         self.replicas.add(hostname)
         self.ring.add_server(hostname)
         self.heartbeat_fail_count[hostname] = 0
+
 
     async def remove_server(self, hostname: str):
         async with self.semaphore:
@@ -108,7 +113,25 @@ class Manager:
 
             for d in dead:
                 print(f"{Fore.RED}[Heartbeat] {d} failed! Respawning...{Style.RESET_ALL}")
-                await self.remove_server(d)
+                # mark dead and attempt to restore by removing and spawning a new server
+                try:
+                    await self.remove_server(d)
+                except Exception:
+                    pass
                 new_name = f"ServerAuto{self.counter}"
                 self.counter += 1
                 await self.spawn_server(new_name)
+
+    async def _send_config(server_name, shard_list, retries=5, delay=2):
+        async with aiohttp.ClientSession() as session:
+            for attempt in range(retries):
+               try:
+                  async with session.post(f"http://{server_name}:5000/config",
+                                        json={"shard_ids": shard_list}) as resp:
+                     if resp.status == 200:
+                        print(f"[Config] {server_name} configured OK")
+                        return
+               except Exception as e:
+                   print(f"Warning: /config call to {server_name} failed (attempt {attempt+1}): {e}")
+               await asyncio.sleep(delay)
+        print(f"[Config] Failed to configure {server_name} after {retries} retries")
