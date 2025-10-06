@@ -4,6 +4,15 @@ import os
 import asyncio
 import sys
 from colorama import Fore, Style
+import logging
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,  # change to DEBUG for more details
+    format='[%(asctime)s] [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 app = Quart(__name__)
 
@@ -24,6 +33,7 @@ owned_shards = set()
 async def startup():
     global db_pool
     try:
+        logger.info(f"Server {SERVER_ID}: Starting database connection...")
         db_pool = await asyncpg.create_pool(
             user=DB_USER,
             password=DB_PASSWORD,
@@ -34,13 +44,14 @@ async def startup():
 
         async with db_pool.acquire() as conn:
             async with conn.transaction():
+                logger.info("Creating TermT table if not exists...")
                 await conn.execute('''--sql
                     CREATE TABLE IF NOT EXISTS TermT (
                         shard_id TEXT PRIMARY KEY,
                         term INTEGER NOT NULL DEFAULT 0
                     );
                 ''')
-
+                logger.info("Creating StudT table if not exists...")
                 await conn.execute('''--sql
                     CREATE TABLE IF NOT EXISTS StudT (
                         stud_id INTEGER NOT NULL,
@@ -53,11 +64,10 @@ async def startup():
                         FOREIGN KEY (shard_id) REFERENCES TermT (shard_id)
                     );
                 ''')
-
-        print(f"[{SERVER_ID}] ✅ Database initialized successfully")
+        logger.info(f"Server {SERVER_ID}: Database initialized successfully")
 
     except Exception as e:
-        print(f'{Fore.RED}ERROR | {e.__class__.__name__}: {e}{Style.RESET_ALL}', file=sys.stderr)
+        logger.error(f"Server {SERVER_ID}: {e.__class__.__name__}: {e}")
         sys.exit(1)
 
 
@@ -106,7 +116,7 @@ async def config():
         payload = await request.get_json()
         shards = payload.get("shards", [])
         owned_shards.update(shards)
-
+        logger.info(f"Received config request: shards={shards}")
         async with db_pool.acquire() as conn:
             async with conn.transaction():
                 for shard_id in shards:
@@ -115,10 +125,11 @@ async def config():
                         VALUES ($1, 0)
                         ON CONFLICT (shard_id) DO NOTHING;
                     ''', shard_id)
-
+                    logger.info(f"Inserted shard into TermT: {shard_id}")
         return jsonify({"status": "success"}), 200
 
     except Exception as e:
+        logger.error(f"Server {SERVER_ID}: {e.__class__.__name__}: {e}")
         return jsonify({"status": "error", "message": str(e)}), 400
 
 
