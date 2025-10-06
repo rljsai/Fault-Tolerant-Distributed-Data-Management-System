@@ -1,3 +1,5 @@
 quart==0.18.4
 werkzeug==2.2.0
 asyncpg==0.29.0
+colorama==0.4.6
+

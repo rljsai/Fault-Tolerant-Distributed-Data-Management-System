@@ -1,10 +1,13 @@
-from quart import Quart, jsonify, request
-import os
+from quart import Quart, jsonify, request, Response
 import asyncpg
-
+import os
+import asyncio
+import sys
+from colorama import Fore, Style
 
 app = Quart(__name__)
 
+# -------------------- Environment --------------------
 SERVER_ID = os.environ.get("SERVER_ID", "default-server")
 DB_USER = os.environ.get("POSTGRES_USER", "postgres")
 DB_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
@@ -12,210 +15,303 @@ DB_NAME = os.environ.get("POSTGRES_DB", "studdb")
 DB_HOST = os.environ.get("DB_HOST", "localhost")
 DB_PORT = int(os.environ.get("DB_PORT", 5432))
 
-
-# Global DB pool
-db_pool: asyncpg.Pool = None
-
-# Keep shard_ids assigned to this server
+db_pool = None
 owned_shards = set()
 
 
+# -------------------- Startup / Shutdown --------------------
 @app.before_serving
 async def startup():
     global db_pool
-    db_pool = await asyncpg.create_pool(
-        user=DB_USER,
-        password=DB_PASSWORD,
-        database=DB_NAME,
-        host=DB_HOST,
-        port=DB_PORT
-    )
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS StudT (
-                Stud_id INT PRIMARY KEY,
-                Stud_name TEXT,
-                Stud_marks INT,
-                Shard_id TEXT
-            );
-        """)
-    print(f"[{SERVER_ID}] Database initialized successfully")
+    try:
+        db_pool = await asyncpg.create_pool(
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME,
+            host=DB_HOST,
+            port=DB_PORT
+        )
+
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute('''--sql
+                    CREATE TABLE IF NOT EXISTS TermT (
+                        shard_id TEXT PRIMARY KEY,
+                        term INTEGER NOT NULL DEFAULT 0
+                    );
+                ''')
+
+                await conn.execute('''--sql
+                    CREATE TABLE IF NOT EXISTS StudT (
+                        stud_id INTEGER NOT NULL,
+                        stud_name TEXT NOT NULL,
+                        stud_marks INTEGER NOT NULL,
+                        shard_id TEXT NOT NULL,
+                        created_at INTEGER NOT NULL,
+                        deleted_at INTEGER DEFAULT NULL,
+                        PRIMARY KEY (stud_id, created_at),
+                        FOREIGN KEY (shard_id) REFERENCES TermT (shard_id)
+                    );
+                ''')
+
+        print(f"[{SERVER_ID}] ✅ Database initialized successfully")
+
+    except Exception as e:
+        print(f'{Fore.RED}ERROR | {e.__class__.__name__}: {e}{Style.RESET_ALL}', file=sys.stderr)
+        sys.exit(1)
+
+
 @app.after_serving
 async def shutdown():
     await db_pool.close()
 
 
-# -------------------- Basic endpoints --------------------
+# -------------------- Helper Functions --------------------
+async def apply_rules(conn, shard_id, valid_at):
+    """
+    Rule 1 : delete entries where created_at > vat or (deleted_at is not null and deleted_at <= vat)
+    Rule 2 : update deleted_at = null where deleted_at > vat
+    """
+    await conn.execute('''--sql
+        DELETE FROM StudT
+        WHERE shard_id = $1
+          AND (created_at > $2 OR (deleted_at IS NOT NULL AND deleted_at <= $2));
+    ''', shard_id, valid_at)
 
+    await conn.execute('''--sql
+        UPDATE StudT
+        SET deleted_at = NULL
+        WHERE shard_id = $1 AND deleted_at > $2;
+    ''', shard_id, valid_at)
+
+
+# -------------------- Basic endpoints --------------------
 @app.route("/home", methods=["GET"])
 async def home():
     return jsonify({
-        "message": f"Hello from server: {SERVER_ID}",
+        "message": f"Hello from Server: {SERVER_ID}",
         "status": "successful"
     }), 200
 
 
 @app.route("/heartbeat", methods=["GET"])
 async def heartbeat():
-    return jsonify({
-        "message": "active",
-        "status": "successful"
-    }), 200
+    return Response(status=200)
+
 
 # -------------------- Config --------------------
-
 @app.route("/config", methods=["POST"])
 async def config():
-    """
-    Assign shards to this server.
-    Request: { "shard_ids": [1,2,...] }
-    """
-    data = await request.get_json()
-    shard_ids = data.get("shard_ids", [])
-    owned_shards.update(shard_ids)
+    try:
+        payload = await request.get_json()
+        shards = payload.get("shards", [])
+        owned_shards.update(shards)
 
-    return jsonify({
-        "message": f"Configured shards {shard_ids} on {SERVER_ID}",
-        "status": "successful"
-    }), 200
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                for shard_id in shards:
+                    await conn.execute('''--sql
+                        INSERT INTO TermT (shard_id, term)
+                        VALUES ($1, 0)
+                        ON CONFLICT (shard_id) DO NOTHING;
+                    ''', shard_id)
+
+        return jsonify({"status": "success"}), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
 
 
 # -------------------- Write --------------------
 @app.route("/write", methods=["POST"])
 async def write():
-    """
-    Request: { "shard": "shX", "curr_idx": <int>, "data": [ {Stud_id, Stud_name, Stud_marks}, ... ] }
-    """
-    data = await request.get_json()
-    shard_id = data.get("shard")
-    curr_idx = data.get("curr_idx")
-    rows = data.get("data", [])
+    try:
+        payload = await request.get_json()
+        shard_id = payload.get("shard")
+        valid_at = int(payload.get("valid_at", -1))
+        data = payload.get("data", [])
+        admin = str(payload.get("admin", "false")).lower() == "true"
 
-    if shard_id not in owned_shards:
-        return jsonify({"error": f"This server does not own shard {shard_id}"}), 400
+        if shard_id not in owned_shards:
+            return jsonify({"status": "error", "message": "Shard not owned"}), 400
 
-    async with db_pool.acquire() as conn:
-        for row in rows:
-            await conn.execute("""
-                INSERT INTO StudT (Stud_id, Stud_name, Stud_marks, Shard_id)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (Stud_id)
-                DO UPDATE SET Stud_name = EXCLUDED.Stud_name,
-                              Stud_marks = EXCLUDED.Stud_marks,
-                              Shard_id = EXCLUDED.Shard_id;
-            """, row["Stud_id"], row["Stud_name"], row["Stud_marks"], shard_id)
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                if admin:
+                    term = valid_at
+                else:
+                    await apply_rules(conn, shard_id, valid_at)
+                    term = await conn.fetchval("SELECT term FROM TermT WHERE shard_id=$1", shard_id)
+                    term = max(term or 0, valid_at) + 1
 
-    return jsonify({"status": "success", "inserted": len(rows)}), 200
+                stmt = await conn.prepare('''--sql
+                    INSERT INTO StudT (stud_id, stud_name, stud_marks, shard_id, created_at)
+                    VALUES ($1, $2, $3, $4, $5);
+                ''')
+                await stmt.executemany([
+                    (row["stud_id"], row["stud_name"], row["stud_marks"], shard_id, term)
+                    for row in data
+                ])
+
+                await conn.execute("UPDATE TermT SET term=$1 WHERE shard_id=$2", term, shard_id)
+
+        return jsonify({"message": "Data entries added", "valid_at": term, "status": "success"}), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
 
 
 # -------------------- Read --------------------
 @app.route("/read", methods=["POST"])
 async def read():
-    """
-    Request: { "shard": "shX", "Stud_id": {"low": <int>, "high": <int>} }
-    """
-    data = await request.get_json()
-    shard_id = data.get("shard")
-    stud_range = data.get("Stud_id", {})
-    low = stud_range.get("low")
-    high = stud_range.get("high")
+    try:
+        payload = await request.get_json()
+        shard_id = payload.get("shard")
+        stud_range = payload.get("stud_id", {})
+        valid_at = int(payload.get("valid_at", -1))
 
-    if shard_id not in owned_shards:
-        return jsonify({"error": f"This server does not own shard {shard_id}"}), 400
+        low = int(stud_range.get("low", -1))
+        high = int(stud_range.get("high", -1))
 
-    async with db_pool.acquire() as conn:
-        if low is not None and high is not None:
-            rows = await conn.fetch(
-                "SELECT * FROM StudT WHERE Shard_id=$1 AND Stud_id BETWEEN $2 AND $3",
-                shard_id, int(low), int(high)
-            )
-        else:
-            rows = await conn.fetch("SELECT * FROM StudT WHERE Shard_id=$1", shard_id)
+        if shard_id not in owned_shards:
+            return jsonify({"status": "error", "message": "Shard not owned"}), 400
 
-    return jsonify([dict(r) for r in rows]), 200
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                await apply_rules(conn, shard_id, valid_at)
+                rows = await conn.fetch('''--sql
+                    SELECT stud_id, stud_name, stud_marks
+                    FROM StudT
+                    WHERE shard_id=$1
+                      AND stud_id BETWEEN $2 AND $3
+                      AND created_at <= $4
+                      AND (deleted_at IS NULL OR deleted_at > $4);
+                ''', shard_id, low, high, valid_at)
 
+        return jsonify({"data": [dict(r) for r in rows], "status": "success"}), 200
 
-# -------------------- Copy --------------------
-@app.route("/copy", methods=["GET"])
-async def copy_shard():
-    """
-    Copy all rows from a shard (used for recovery).
-    Query param: shard_id=<id>
-    """
-    shard_id = request.args.get("shard_id")
-    if not shard_id:
-        return jsonify({"error": "shard_id missing"}), 400
-
-    if shard_id not in owned_shards:
-        return jsonify({"error": f"This server does not own {shard_id}"}), 400
-
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch(
-            'SELECT * FROM studt WHERE shard_id=$1',
-            shard_id
-        )
-
-    # Always return { "rows": [...] }
-    return jsonify({"rows": [dict(r) for r in rows]}), 200
-
-
-# -------------------- Update --------------------
-@app.route("/update", methods=["PUT"])
-async def update():
-    """
-    Update marks/name for a student.
-    Request: { "Stud_id": 2255, "data": {"Stud_id":2255,"Stud_name":"GHI","Stud_marks":30} }
-    """
-    data = await request.get_json()
-    stud_id = data.get("Stud_id")
-    update_data = data.get("data", {})
-
-    if not stud_id or not update_data:
-        return jsonify({"error": "Stud_id and data required"}), 400
-
-    shard_id = update_data.get("Shard_id")
-    if shard_id not in owned_shards:
-        return jsonify({"error": f"This server does not own the shard {shard_id}"}), 400
-
-    async with db_pool.acquire() as conn:
-        result = await conn.execute("""
-            UPDATE StudT
-            SET Stud_name=$1, Stud_marks=$2
-            WHERE Stud_id=$3 AND Shard_id=$4
-        """, update_data["Stud_name"], update_data["Stud_marks"], stud_id, shard_id)
-
-    return jsonify({
-        "message": f"Data entry for Stud_id:{stud_id} updated",
-        "status": "success"
-    }), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
 
 
 # -------------------- Delete --------------------
 @app.route("/del", methods=["DELETE"])
 async def delete():
-    """
-    Delete a student row.
-    Request: { "Stud_id": 2255, "Shard_id": "sh1" }
-    """
-    data = await request.get_json()
-    stud_id = data.get("Stud_id")
-    shard_id = data.get("Shard_id")
+    try:
+        payload = await request.get_json()
+        shard_id = payload.get("shard")
+        stud_id = int(payload.get("stud_id", -1))
+        valid_at = int(payload.get("valid_at", -1))
 
-    if not stud_id:
-        return jsonify({"error": "Stud_id required"}), 400
-    if shard_id not in owned_shards:
-        return jsonify({"error": f"This server does not own the shard {shard_id}"}), 400
+        if shard_id not in owned_shards:
+            return jsonify({"status": "error", "message": "Shard not owned"}), 400
 
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM StudT WHERE Stud_id=$1 AND Shard_id=$2", stud_id, shard_id)
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                await apply_rules(conn, shard_id, valid_at)
+                term = await conn.fetchval("SELECT term FROM TermT WHERE shard_id=$1", shard_id)
+                term = max(term or 0, valid_at) + 1
 
-    return jsonify({
-        "message": f"Data entry with Stud_id:{stud_id} removed",
-        "status": "success"
-    }), 200
+                await conn.execute('''--sql
+                    UPDATE StudT
+                    SET deleted_at=$1
+                    WHERE shard_id=$2 AND stud_id=$3 AND created_at <= $4;
+                ''', term, shard_id, stud_id, valid_at)
+
+                await conn.execute("UPDATE TermT SET term=$1 WHERE shard_id=$2", term, shard_id)
+
+        return jsonify({
+            "message": f"Data entry with stud_id:{stud_id} removed",
+            "valid_at": term,
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+# -------------------- Update --------------------
+@app.route("/update", methods=["POST"])
+async def update():
+    try:
+        payload = await request.get_json()
+        shard_id = payload.get("shard")
+        valid_at = int(payload.get("valid_at", -1))
+        data = payload.get("data", {})
+        stud_id = int(payload.get("stud_id", -1))
+
+        if shard_id not in owned_shards:
+            return jsonify({"status": "error", "message": "Shard not owned"}), 400
+
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                await apply_rules(conn, shard_id, valid_at)
+                term = await conn.fetchval("SELECT term FROM TermT WHERE shard_id=$1", shard_id)
+                term = max(term or 0, valid_at) + 1
+
+                # Mark old as deleted
+                await conn.execute('''--sql
+                    UPDATE StudT
+                    SET deleted_at=$1
+                    WHERE shard_id=$2 AND stud_id=$3 AND created_at <= $4;
+                ''', term, shard_id, stud_id, valid_at)
+
+                # Insert new record
+                term += 1
+                await conn.execute('''--sql
+                    INSERT INTO StudT (stud_id, stud_name, stud_marks, shard_id, created_at)
+                    VALUES ($1, $2, $3, $4, $5);
+                ''', data["stud_id"], data["stud_name"], data["stud_marks"], shard_id, term)
+
+                await conn.execute("UPDATE TermT SET term=$1 WHERE shard_id=$2", term, shard_id)
+
+        return jsonify({
+            "message": f"Data entry for stud_id:{stud_id} updated",
+            "valid_at": term,
+            "status": "success"
+        }), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+# -------------------- Copy --------------------
+@app.route("/copy", methods=["POST"])
+async def copy():
+    try:
+        # Read JSON payload
+        payload = await request.get_json()
+        shards = payload.get("shards", [])
+        valid_at = payload.get("valid_at", [])
+
+        if not shards or not valid_at:
+            return jsonify({"status": "error", "message": "Missing 'shards' or 'valid_at'"}), 400
+
+        response = {}
+
+        async with db_pool.acquire() as conn:
+            async with conn.transaction():
+                for shard, vat in zip(shards, valid_at):
+                    # Apply cleanup rules before copying
+                    await apply_rules(conn, shard, vat)
+
+                    # Fetch rows for this shard and valid_at
+                    rows = await conn.fetch('''--sql
+                        SELECT stud_id, stud_name, stud_marks, created_at, deleted_at
+                        FROM StudT
+                        WHERE shard_id = $1
+                          AND created_at <= $2;
+                    ''', shard, vat)
+
+                    response[shard] = [dict(r) for r in rows]
+
+        response["status"] = "success"
+        return jsonify(response), 200
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
 
 
 # -------------------- Run --------------------
-
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=5000, use_reloader=False)
